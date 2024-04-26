@@ -1,0 +1,453 @@
+language ESSENCE' 1.0
+
+$ Model structure:
+$ <state0>         -> <mode>
+$ <matching grid0>    to control:
+$                     <action1>
+$                     to derive:
+$                     <state1>
+$                     <matching grid1>
+
+$ ---- Parameters & Constants ----
+
+$ NB Counting rows *upwards* to match the PDDL model.
+letting WALL be 0
+letting EMPTY be 1
+$ Positions of the patterned blocks given separately.
+$ In this input,
+given initGrid : matrix indexed by[int(1..gridHeight), int(1..gridWidth)] of int(WALL, EMPTY)
+letting GRIDCOLS be domain int(1..gridWidth)
+letting INTERIORCOLS be domain int(2..gridWidth-1)
+letting GRIDROWS be domain int(1..gridHeight)
+letting INTERIORROWS be domain int(2..gridHeight-1)
+
+$ Initial positions of the patterned blocks, in ascending pattern order
+$ Format: row, col
+given initPatternedBlocks : matrix indexed by[int(1..noPatternedBlocks), int(1..2)] of int(1..)
+letting PATTERNEDBLOCKS be int (1..noPatternedBlocks)
+
+$ To make things simple, assume this also.
+$ List of start and end positions for each pattern band.
+given patternBands : matrix indexed by [int(1..noPatterns), int(1..2)] of PATTERNEDBLOCKS
+letting PATTERNS be domain int(1..noPatterns)
+
+given noSteps : int(1..)
+letting STEPSFROM1 be domain int(1..noSteps)
+letting STEPSFROM0 be domain int(0..noSteps)
+letting STEPSEXCEPTLAST be domain int(0..noSteps-1)
+letting INTERIORSTEPS be domain int(1..noSteps-1)
+
+$ ---- Decision Variables ----
+$ Assuming a perimeter wall.
+
+$ This is for PROGRESSING_MODE
+$ With an explicit representation of patterned block positions,
+$ move is an index into 1..noPatternedBlocks
+find move : matrix indexed by[STEPSFROM1] of PATTERNEDBLOCKS union int(0)
+find moveDir : matrix indexed by[STEPSFROM1] of int(-1,1)
+
+$ This is for ROWCOMPACT_MODE
+$ We'll be using the lower bound as the dummy
+find compactRow : matrix indexed by[STEPSFROM1] of INTERIORROWS union int(0)
+
+$ Instead of finding grid, we want to find the current positions of the patterned blocks.
+letting REMOVED be 0
+find patternedBlocksRow : matrix indexed by[STEPSFROM0, PATTERNEDBLOCKS]
+  of INTERIORROWS union int(REMOVED)
+find patternedBlocksCol : matrix indexed by[STEPSFROM0, PATTERNEDBLOCKS]
+  of INTERIORCOLS union int(REMOVED)
+
+$ true is matching
+find matchingGrid : matrix indexed by[STEPSEXCEPTLAST, PATTERNEDBLOCKS] of bool
+
+$ Indicates whether we are in matching mode, row compact mode, or progressing move mode
+letting MATCHING_MODE be 0
+letting PROGRESSING_MODE be 1
+letting ROWCOMPACT_MODE be 2
+letting MODES be domain int(MATCHING_MODE, ROWCOMPACT_MODE, PROGRESSING_MODE)
+find mode : matrix indexed by[STEPSFROM1] of MODES
+
+$  'branching on' simply places the variables in time order.
+branching on [
+              [[patternedBlocksCol[0,b], matchingGrid[0,b]]
+               | b: PATTERNEDBLOCKS],
+              [[mode[i], move[i], moveDir[i],
+               patternedBlocksRow[i,b], patternedBlocksCol[i,b], matchingGrid[i,b]]
+               | i: int(1..noSteps-1), b: PATTERNEDBLOCKS],
+              [mode[noSteps], move[noSteps], moveDir[noSteps]],
+              [[patternedBlocksRow[noSteps,b], patternedBlocksCol[noSteps,b]]
+               | b: PATTERNEDBLOCKS]
+             ]
+
+$ ---- Constraints -------------------------------------------------------------
+such that
+
+$ ---- Initial & Goal States ----------------------------
+$ Initial state:
+forAll b : PATTERNEDBLOCKS .
+  patternedBlocksRow[0, b] = initPatternedBlocks[b,1],
+forAll b : PATTERNEDBLOCKS .
+  patternedBlocksCol[0, b] = initPatternedBlocks[b,2],
+
+$ Goal state:
+forAll b : PATTERNEDBLOCKS .
+  patternedBlocksRow[noSteps, b] = REMOVED,
+forAll b : PATTERNEDBLOCKS .
+  patternedBlocksCol[noSteps, b] = REMOVED,
+$ ---- End of Initial & Goal States ---------------------
+
+$ ---- Mode detection -----------------------------------
+$ A progressing move may trigger matching mode at the following
+$  step rather than improve the fall metric immediately.
+$ Matching mode forced if two blocks adjacent.
+forAll step : STEPSFROM1 .
+  (mode[step] = MATCHING_MODE) <->
+  (sum(flatten(matchingGrid[step-1,..])) > 0),
+  
+$ Break symmetry: A move that does not lead to a match should be labelled row compact
+forAll step : INTERIORSTEPS .
+  (mode[step] = ROWCOMPACT_MODE) ->
+  (mode[step+1] != MATCHING_MODE),
+  
+$ Break symmetry: A move that leads to a match should be labelled progressing
+forAll step : INTERIORSTEPS .
+  (mode[step] = PROGRESSING_MODE) ->
+  ((mode[step+1] = MATCHING_MODE) \/
+   (exists b : PATTERNEDBLOCKS. patternedBlocksRow[step,b] < patternedBlocksRow[step-1,b])),
+$ ---- End of Mode detection ----------------------------
+
+$ ---- Populate Matching Grid ---------------------------
+$ This is set up this way to get the Iff.
+forAll step : STEPSEXCEPTLAST .
+  forAll p : PATTERNS .
+    forAll i : int(patternBands[p,1]..patternBands[p,2]) .
+      (exists j : int(patternBands[p,1]..patternBands[p,2]) .
+        ((j != i) /\
+         (((patternedBlocksRow[step,i] = patternedBlocksRow[step,j]) /\
+           (|patternedBlocksCol[step,i] - patternedBlocksCol[step,j]| = 1)) \/
+          ((patternedBlocksCol[step,i] = patternedBlocksCol[step,j]) /\
+           (|patternedBlocksRow[step,i] - patternedBlocksRow[step,j]| = 1))
+         )
+        )
+      )
+      <->
+      (matchingGrid[step,i]),
+$ ---- End of Populate Matching Grid --------------------
+
+$ ---- Matching Mode ------------------------
+$ Matched blocks are removed.
+forAll step : STEPSFROM1 .
+  (mode[step] = MATCHING_MODE) ->
+  (forAll b : PATTERNEDBLOCKS .
+     (matchingGrid[step-1,b]) ->
+     (patternedBlocksRow[step,b] = REMOVED) /\ (patternedBlocksCol[step,b] = REMOVED)
+  ),
+
+$ Unmatched, unremoved blocks must stay on the grid, and in the same column
+forAll step : STEPSFROM1 .
+  (mode[step] = MATCHING_MODE) ->
+  (forAll b : PATTERNEDBLOCKS .
+    (!(matchingGrid[step-1,b]) /\ (patternedBlocksRow[step-1,b] != REMOVED)) ->
+    ((patternedBlocksRow[step,b] != REMOVED) /\
+     (patternedBlocksCol[step,b] = patternedBlocksCol[step-1,b]))
+  ),
+  
+$ Unmatched block must stay above: All unmatched blocks in same col, which it was above before.
+forAll step : STEPSFROM1 .
+  (mode[step] = MATCHING_MODE) ->
+  (forAll b : PATTERNEDBLOCKS .
+    (!(matchingGrid[step-1,b])) ->
+    (forAll b2 : PATTERNEDBLOCKS .
+       ((b2 != b) /\
+        (!(matchingGrid[step-1,b2])) /\
+        (patternedBlocksCol[step-1,b2] = patternedBlocksCol[step-1,b]) /\
+        (patternedBlocksRow[step-1,b2] > patternedBlocksRow[step-1,b])
+       )
+       ->
+       (patternedBlocksRow[step,b2] > patternedBlocksRow[step,b])
+    )
+  ),
+  
+$ Unmatched block must stay above/below wall blocks it was above/below before
+forAll step : STEPSFROM1 .
+  (mode[step] = MATCHING_MODE) ->
+  (forAll b : PATTERNEDBLOCKS .
+    (!(matchingGrid[step-1,b])) ->
+    (forAll row : INTERIORROWS .
+      (initGrid[row, patternedBlocksCol[step-1,b]] = WALL)
+      ->
+      ((row < patternedBlocksRow[step-1,b]) -> (row < patternedBlocksRow[step,b])) /\
+      ((row > patternedBlocksRow[step-1,b]) -> (row > patternedBlocksRow[step,b]))
+    )
+  ),
+
+$ Pin rowCompact and movement variables to break symmetry
+forAll step : STEPSFROM1 .
+  (mode[step] = MATCHING_MODE) ->
+   ((move[step] = 0) /\
+    (moveDir[step] = -1) /\
+    (compactRow[step] = 0)),
+$ ---- End of Matching Mode -----------------
+
+$ ---- Common to all modes -----------------
+$ Removed blocks stay removed.
+forAll step : STEPSFROM1 .
+  forAll b : PATTERNEDBLOCKS .
+    (patternedBlocksRow[step-1,b] = REMOVED) ->
+    ((patternedBlocksRow[step,b] = REMOVED) /\ (patternedBlocksCol[step,b] = REMOVED)),
+
+$ No floating blocks: either wall there or there exists another block.
+forAll step : STEPSFROM1 .
+  forAll b : PATTERNEDBLOCKS .
+    (patternedBlocksRow[step,b] != REMOVED)
+    ->
+    ((initGrid[patternedBlocksRow[step,b]-1, patternedBlocksCol[step,b]] = WALL) \/
+     (exists b2 : PATTERNEDBLOCKS .
+       (b != b2) /\
+       (patternedBlocksRow[step,b2] = patternedBlocksRow[step,b] - 1) /\
+       (patternedBlocksCol[step,b2] = patternedBlocksCol[step,b])
+     )
+    ),
+$ ---- End of Common to all modes ----------
+
+$ ---- Progressing move mode ---------------------------
+$ Select only valid blocks
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE)
+  ->
+  (patternedBlocksRow[step-1,move[step]] != REMOVED),
+
+$ destCol defined via moveDir
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE)
+  ->
+  (patternedBlocksCol[step,move[step]] = patternedBlocksCol[step-1,move[step]]+moveDir[step]),
+
+$ destRow must be at or below moveRow
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE)
+  ->
+  (patternedBlocksRow[step,move[step]] <= patternedBlocksRow[step-1,move[step]]),
+  
+$ in destCol, everything from moveRow to destRow must be empty.
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE)
+  ->
+  (forAll row : INTERIORROWS .
+     ((row <= patternedBlocksRow[step-1,move[step]]) /\
+      (row >= patternedBlocksRow[step,move[step]]))
+     ->
+     (
+       (initGrid[row, patternedBlocksCol[step,move[step]]] = EMPTY) /\
+       (forAll b : PATTERNEDBLOCKS .
+         ((patternedBlocksRow[step-1, b] != row) \/
+          (patternedBlocksCol[step-1, b] != patternedBlocksCol[step,move[step]]))
+       )
+     )
+  ),
+
+$ Frame axiom: blocks not in source col stay in the same place.
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE)
+  ->
+  (forAll b : PATTERNEDBLOCKS .
+     (patternedBlocksCol[step-1, b] != patternedBlocksCol[step-1, move[step]])
+     ->
+     ((patternedBlocksCol[step-1, b] = patternedBlocksCol[step, b]) /\
+      (patternedBlocksRow[step-1, b] = patternedBlocksRow[step, b]))
+  ),
+
+$ Frame axiom: blocks in source col underneath that selected stay in the same place.
+$ Simplified to all blocks whose row is greater than that selected.
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE)
+  ->
+  (forAll b : PATTERNEDBLOCKS .
+     (patternedBlocksRow[step-1, b] < patternedBlocksRow[step-1, move[step]])
+     ->
+     ((patternedBlocksCol[step-1, b] = patternedBlocksCol[step, b]) /\
+      (patternedBlocksRow[step-1, b] = patternedBlocksRow[step, b]))
+  ),
+
+$ Gravity: if above selected block and no wall in the way, fall one cell.
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE)
+  ->
+  (forAll b : PATTERNEDBLOCKS .
+     ((patternedBlocksRow[step-1, b] > patternedBlocksRow[step-1, move[step]]) /\
+      (patternedBlocksCol[step-1, b] = patternedBlocksCol[step-1, move[step]]) /\
+      (forAll row : INTERIORROWS .
+         ((row < patternedBlocksRow[step-1, b]) /\
+          (row > patternedBlocksRow[step-1, move[step]]))
+         ->
+         (initGrid[row, patternedBlocksCol[step-1, move[step]]] = EMPTY)
+      )
+     )
+     ->
+     ((patternedBlocksCol[step, b] = patternedBlocksCol[step-1, b]) /\
+      (patternedBlocksRow[step, b] = patternedBlocksRow[step-1, b] - 1))
+  ),
+
+$ Gravity: if above selected block and wall in the way, stay in the same location.
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE)
+  ->
+  (forAll b : PATTERNEDBLOCKS .
+     ((patternedBlocksRow[step-1, b] > patternedBlocksRow[step-1, move[step]]) /\
+      (patternedBlocksCol[step-1, b] = patternedBlocksCol[step-1, move[step]]) /\
+      (exists row : INTERIORROWS .
+         ((row < patternedBlocksRow[step-1, b]) /\
+          (row > patternedBlocksRow[step-1, move[step]]) /\
+          (initGrid[row, patternedBlocksCol[step-1, move[step]]] = WALL))
+      )
+     )
+     ->
+     ((patternedBlocksCol[step, b] = patternedBlocksCol[step-1, b]) /\
+      (patternedBlocksRow[step, b] = patternedBlocksRow[step-1, b]))
+  ),
+  
+$ Blocks cannot be REMOVED as a result of progressing mode.
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE) ->
+  ($ If it wasn't removed before it isn't now.
+   forAll b : PATTERNEDBLOCKS .
+     (((patternedBlocksCol[step-1, b] != REMOVED) ->
+       (patternedBlocksCol[step, b] != REMOVED)) /\
+      ((patternedBlocksRow[step-1, b] != REMOVED) ->
+       (patternedBlocksRow[step, b] != REMOVED))
+     )
+  ),
+  
+$ Pin rowCompact variable to break symmetry
+forAll step : STEPSFROM1 .
+  (mode[step] = PROGRESSING_MODE) ->
+  (compactRow[step] = 0),
+$ ---- Row Compact mode ---------------------------
+$ The row coordinate of every patterned block is unchanged.
+forAll step : STEPSFROM1 .
+  (mode[step] = ROWCOMPACT_MODE)
+  ->
+  (forAll block : PATTERNEDBLOCKS .
+     patternedBlocksRow[step, block] = patternedBlocksRow[step-1, block]
+  ),
+
+$ Anything not on the selected row stays exactly where it is.
+$ Since we fixed the rows above, only need to mention the columns.
+forAll step : STEPSFROM1 .
+  (mode[step] = ROWCOMPACT_MODE)
+  ->
+  (forAll block : PATTERNEDBLOCKS .
+     (patternedBlocksRow[step-1, block] != compactRow[step])
+     ->
+     (patternedBlocksCol[step, block] = patternedBlocksCol[step-1, block])
+  ),
+  
+$ Anything covered by another block stays where it is.
+$ Don't need to guard with compactRow because it is true irrespective.
+$ Since we fixed the rows above, only need to mention the columns.
+forAll step : STEPSFROM1 .
+  (mode[step] = ROWCOMPACT_MODE)
+  ->
+  (forAll block : PATTERNEDBLOCKS .
+     (exists block2 : PATTERNEDBLOCKS .
+       ((patternedBlocksCol[step-1, block] = patternedBlocksCol[step-1, block2]) /\
+        (patternedBlocksRow[step-1, block2] = patternedBlocksRow[step-1, block] + 1)))
+     ->
+     (patternedBlocksCol[step, block] = patternedBlocksCol[step-1, block])
+  ),
+  
+$ Stay on the same side of all wall blocks on the same row.
+forAll step : STEPSFROM1 .
+  (mode[step] = ROWCOMPACT_MODE)
+  ->
+  (forAll col : INTERIORCOLS .
+     (initGrid[compactRow[step], col] = WALL) ->
+     (forAll block : PATTERNEDBLOCKS .
+        (patternedBlocksRow[step-1, block] = compactRow[step]) ->
+        (((patternedBlocksCol[step-1, block] < col) -> (patternedBlocksCol[step, block] < col)) /\
+         ((patternedBlocksCol[step-1, block] > col) -> (patternedBlocksCol[step, block] > col)))
+     )
+  ),
+  
+$ Maintain order on the blocks in the chosen row.
+forAll step : STEPSFROM1 .
+  (mode[step] = ROWCOMPACT_MODE)
+  ->
+  (forAll block : PATTERNEDBLOCKS .
+     (patternedBlocksRow[step-1, block] = compactRow[step])
+     ->
+     (forAll block2 : int(block + 1 .. noPatternedBlocks) .
+        (patternedBlocksRow[step-1, block2] = compactRow[step])
+        ->
+        (((patternedBlocksCol[step-1, block] < patternedBlocksCol[step-1, block2]) ->
+          (patternedBlocksCol[step, block] < patternedBlocksCol[step, block2])) /\
+         ((patternedBlocksCol[step-1, block] > patternedBlocksCol[step-1, block2]) ->
+          (patternedBlocksCol[step, block] > patternedBlocksCol[step, block2])))
+     )
+  ),
+
+$ In a non-progressing row compact move, we cannot move one block onto or over
+$ another of the same colour. We exploit the pattern bands to compare only blocks
+$ of like pattern.
+forAll step : STEPSFROM1 .
+  (mode[step] = ROWCOMPACT_MODE)
+  ->
+  (forAll pattern : PATTERNS .
+     forAll block : int(patternBands[pattern,1]..patternBands[pattern,2]) .
+       (patternedBlocksRow[step-1, block] = compactRow[step]) ->
+       (forAll block2 : int(patternBands[pattern,1]..patternBands[pattern,2]) .
+          (patternedBlocksRow[step-1, block2] = compactRow[step]-1) ->
+          (((patternedBlocksCol[step-1, block] < patternedBlocksCol[step-1, block2]) ->
+            (patternedBlocksCol[step, block] < patternedBlocksCol[step, block2])) /\
+           ((patternedBlocksCol[step-1, block] > patternedBlocksCol[step-1, block2]) ->
+            (patternedBlocksCol[step, block] > patternedBlocksCol[step, block2])))
+       )
+  ),
+  
+$ We cannot move a block onto or over a gap that would cause it to fall.
+forAll step : STEPSFROM1 .
+  (mode[step] = ROWCOMPACT_MODE)
+  ->
+  (forAll block : PATTERNEDBLOCKS .
+     (patternedBlocksRow[step-1, block] = compactRow[step])
+     ->
+     (forAll col : INTERIORCOLS .
+        ((initGrid[compactRow[step]-1, col] = EMPTY) /\
+         (forAll block2 : PATTERNEDBLOCKS .
+            (patternedBlocksRow[step-1,block2] != compactRow[step]-1) \/
+            (patternedBlocksCol[step-1,block2] != col)
+         ))
+        ->
+        (((col < patternedBlocksCol[step-1, block]) -> (col < patternedBlocksCol[step, block])) /\
+         ((col > patternedBlocksCol[step-1, block]) -> (col > patternedBlocksCol[step, block])))
+     )
+  ),
+  
+$ Pin movement variables to break symmetry
+forAll step : STEPSFROM1 .
+  (mode[step] = ROWCOMPACT_MODE) ->
+  ((move[step] = 0) /\
+   (moveDir[step] = -1)),
+$ ---- End of Row Compact mode ---------------------------
+
+$ ---- Symmetry breaking ----
+$ NB Try different flattening for lex
+forAll step : STEPSFROM0 .
+  forAll step2 : int(step+1..noSteps) .
+    $ current winner
+    exists block : PATTERNEDBLOCKS .
+      ((patternedBlocksRow[step, block] != patternedBlocksRow[step2, block]) \/
+       (patternedBlocksCol[step, block] != patternedBlocksCol[step2, block])),
+  
+$ ---- Implied constraints ----
+$ The final step must be in matching mode, to derive the last match and a clear grid.
+$ Don't think this has an effect with current branching strategy.
+mode[noSteps] = MATCHING_MODE,
+
+$ In the absence of moving blocks, row coord is monotonically decreasing until removed
+$ NB Now coords are other way around we don't need the guard.
+forAll step : STEPSFROM1 .
+  forAll block : PATTERNEDBLOCKS .
+    (patternedBlocksRow[step, block] <= patternedBlocksRow[step-1, block]),
+
+true
